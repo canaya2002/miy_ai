@@ -359,14 +359,28 @@ function applyStats(d){
     document.getElementById('trainInd').className=d.entrenando?'train on':'train';
 }
 
-// ===== LOAD STATS =====
+// ===== LOAD STATS (SSE con fallback a polling) =====
 async function loadStats(){
     try{
         const r=await fetch('/stats');const d=await r.json();
         applyStats(d);
     }catch(e){}
 }
-setInterval(loadStats,15000);
+
+let _sseConnected=false;
+function initSSE(){
+    if(typeof EventSource==='undefined'){setInterval(loadStats,30000);return}
+    const es=new EventSource('/stream/stats');
+    es.onmessage=function(e){
+        try{const d=JSON.parse(e.data);if(d.temas!=null){applyStats(d);_sseConnected=true}}catch(x){}
+    };
+    es.onerror=function(){
+        es.close();_sseConnected=false;
+        setTimeout(initSSE,60000);
+        setInterval(loadStats,30000);
+    };
+}
+initSSE();
 
 // ===== MESSAGES =====
 function removeWelcome(){
@@ -402,17 +416,18 @@ function showTyping(v){
         for(let i=0;i<20;i++){points+=(i*5)+','+(12+Math.sin(i*0.8)*8)+' '}
         el.innerHTML='<span class="lbl" style="color:var(--accent);font-size:11px;font-family:\'Space Mono\',monospace;margin-bottom:4px;display:block">IA</span><div class="wave-wrap"><svg viewBox="0 0 95 25" preserveAspectRatio="none"><polyline id="brainwave" points="'+points+'" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"/></svg></div><div class="typing-txt">procesando</div>';
         chat.appendChild(el);
-        // Animate the brainwave
-        animateBrainwave();
     }
     el.className=v?'typing on':'typing';
+    if(v&&!bwRunning){bwRunning=true;animateBrainwave()}
+    if(!v){bwRunning=false}
     if(v)scrollEnd();
 }
 
-let bwFrame=0;
+let bwFrame=0,bwRunning=false;
 function animateBrainwave(){
+    if(!bwRunning)return;
     const poly=document.getElementById('brainwave');
-    if(!poly)return;
+    if(!poly){bwRunning=false;return}
     bwFrame++;
     let pts='';
     for(let i=0;i<20;i++){

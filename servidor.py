@@ -1,8 +1,10 @@
 """
-Servidor de produccion: seguridad blindada, SEO, cache, compresion, monitoreo.
+Servidor de produccion: seguridad, SEO, cache, monitoreo.
+Optimizado para 10K usuarios con gevent workers.
+Compresion GZIP delegada a Nginx. Entrenamiento delegado a entrenador_worker.
 """
 
-from flask import Flask, render_template, request, jsonify, make_response, Response
+from flask import Flask, render_template, request, jsonify, Response
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -14,8 +16,7 @@ import re
 import os
 import sys
 import time
-import gzip
-from io import BytesIO
+import json
 import torch
 from collections import OrderedDict
 
@@ -31,7 +32,6 @@ from migrar import migrar_json_a_sqlite
 
 app = Flask(__name__)
 
-# CORS: en produccion solo el dominio propio
 CORS(app, origins=["https://*.onrender.com", "http://localhost:5000", "http://127.0.0.1:5000"])
 
 limiter = Limiter(get_remote_address, app=app, default_limits=["100 per minute"], storage_uri="memory://")
@@ -43,11 +43,40 @@ logger = logging.getLogger(__name__)
 _inicio_servidor = time.time()
 
 # ============================================================
+#  SIGNAL FILES (comunicacion con entrenador_worker)
+# ============================================================
+
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SIGNAL_RETRAIN = os.path.join(_BASE_DIR, "NEEDS_RETRAIN")
+SIGNAL_UPDATED = os.path.join(_BASE_DIR, "MODEL_UPDATED")
+
+
+def solicitar_reentrenamiento():
+    """Escribe signal file para que el worker reentrene."""
+    try:
+        with open(SIGNAL_RETRAIN, "w") as f:
+            f.write(str(time.time()))
+    except Exception:
+        pass
+
+
+def verificar_modelo_actualizado():
+    """Si el worker actualizo el modelo, recargarlo en caliente."""
+    if os.path.exists(SIGNAL_UPDATED):
+        try:
+            os.remove(SIGNAL_UPDATED)
+            modelo_nuevo, vocab_nuevo, tags_nuevo = entrenar.cargar_modelo()
+            actualizar_modelo(modelo_nuevo, vocab_nuevo, tags_nuevo)
+            logger.info("Modelo recargado en caliente.")
+        except Exception as e:
+            logger.error(f"Error recargando modelo: {e}")
+
+
+# ============================================================
 #  SEGURIDAD: SANITIZACION
 # ============================================================
 
 def sanitizar(texto, max_largo=500):
-    """Limpia y valida todo input del usuario"""
     if not isinstance(texto, str):
         return ""
     texto = texto[:max_largo]
@@ -58,7 +87,6 @@ def sanitizar(texto, max_largo=500):
 
 
 def contenido_permitido(texto):
-    """Verifica que el contenido es aceptable para aprendizaje"""
     if 'http://' in texto or 'https://' in texto or 'www.' in texto:
         return False
     if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', texto):
@@ -90,28 +118,13 @@ def security_headers(response):
 
 
 # ============================================================
-#  COMPRESION GZIP
+#  CACHE DE RESPUESTAS (stats y cerebro)
 # ============================================================
 
-@app.after_request
-def comprimir(response):
-    if response.status_code < 200 or response.status_code >= 300:
-        return response
-    if response.direct_passthrough:
-        return response
-    if 'gzip' not in request.headers.get('Accept-Encoding', ''):
-        return response
-    content = response.get_data()
-    if len(content) < 500:
-        return response
-    buf = BytesIO()
-    with gzip.GzipFile(fileobj=buf, mode='wb', compresslevel=6) as f:
-        f.write(content)
-    response.set_data(buf.getvalue())
-    response.headers['Content-Encoding'] = 'gzip'
-    response.headers['Content-Length'] = len(response.get_data())
-    response.headers['Vary'] = 'Accept-Encoding'
-    return response
+_stats_cache = {"data": None, "ts": 0}
+_cerebro_cache = {"data": None, "ts": 0}
+STATS_TTL = 30
+CEREBRO_TTL = 60
 
 
 # ============================================================
@@ -124,7 +137,6 @@ _lock_cache = threading.Lock()
 
 
 def clasificar_con_cache(texto_normalizado, modelo, vocabulario, tags):
-    """Cachea clasificaciones para no recalcular lo mismo"""
     with _lock_cache:
         if texto_normalizado in _cache:
             _cache.move_to_end(texto_normalizado)
@@ -162,7 +174,6 @@ _modelo = None
 _vocabulario = []
 _tags = []
 _lock_modelo = threading.Lock()
-_entrenando = False
 
 
 def obtener_modelo():
@@ -177,28 +188,6 @@ def actualizar_modelo(modelo, vocabulario, tags):
         _vocabulario = vocabulario
         _tags = tags
     invalidar_cache()
-
-
-def reentrenar_background():
-    global _entrenando
-    if _entrenando:
-        return
-
-    def _entrenar():
-        global _entrenando
-        _entrenando = True
-        try:
-            logger.info("Re-entrenamiento iniciado...")
-            modelo_nuevo, vocab_nuevo, tags_nuevo = entrenar.entrenar_modelo()
-            actualizar_modelo(modelo_nuevo, vocab_nuevo, tags_nuevo)
-            stats = bd.obtener_estadisticas()
-            logger.info(f"Re-entrenamiento OK. {stats['temas']} temas, {stats['patrones']} patrones.")
-        except Exception as e:
-            logger.error(f"Error re-entrenamiento: {e}")
-        finally:
-            _entrenando = False
-
-    threading.Thread(target=_entrenar, daemon=True, name="reentrenamiento").start()
 
 
 # ============================================================
@@ -216,9 +205,25 @@ def inicializar():
     except Exception as e:
         logger.error(f"  Error modelo: {e}")
         _modelo, _vocabulario, _tags = entrenar.entrenar_modelo(verbose=True)
-    auto.registrar_callback_reentrenar(reentrenar_background)
-    auto.iniciar_scheduler()
     logger.info("IA lista!")
+
+
+# ============================================================
+#  BEFORE REQUEST: flush mensajes + hot-reload modelo
+# ============================================================
+
+_last_model_check = 0
+MODEL_CHECK_INTERVAL = 10
+
+
+@app.before_request
+def antes_de_request():
+    global _last_model_check
+    bd.flush_mensajes_periodico()
+    ahora = time.time()
+    if ahora - _last_model_check > MODEL_CHECK_INTERVAL:
+        _last_model_check = ahora
+        verificar_modelo_actualizado()
 
 
 # ============================================================
@@ -245,7 +250,7 @@ def elegir_respuesta_ponderada(respuestas):
 def respuesta_con_cookie(data, sesion_id, status=200):
     resp = jsonify(data)
     resp.status_code = status
-    resp.set_cookie("ia_sesion", sesion_id, max_age=86400*30, samesite="Lax")
+    resp.set_cookie("ia_sesion", sesion_id, max_age=86400*30, samesite="Lax", httponly=True)
     return resp
 
 
@@ -307,9 +312,9 @@ def health():
     uptime = int(time.time() - _inicio_servidor)
     return jsonify({
         "status": "ok",
-        "entrenando": _entrenando,
         "uptime_seconds": uptime,
         "modelo_cargado": _modelo is not None,
+        "entrenando": os.path.exists(SIGNAL_RETRAIN),
         **info
     })
 
@@ -375,7 +380,7 @@ def chat():
 # ============================================================
 
 @app.route("/ensenar", methods=["POST"])
-@limiter.limit("10 per minute")
+@limiter.limit("5 per minute")
 def ensenar_ruta():
     try:
         info = request.json if request.json else {}
@@ -421,7 +426,7 @@ def ensenar_ruta():
             if respuesta:
                 auto.absorber_respuesta(tag, respuesta)
 
-        reentrenar_background()
+        solicitar_reentrenamiento()
         return jsonify({"ok": True})
 
     except Exception as e:
@@ -430,15 +435,21 @@ def ensenar_ruta():
 
 
 # ============================================================
-#  API: STATS Y CEREBRO
+#  API: STATS Y CEREBRO (con cache)
 # ============================================================
 
 @app.route("/stats")
 def stats():
     try:
-        datos = bd.obtener_estadisticas()
-        datos["entrenando"] = _entrenando
-        datos["vocabulario"] = len(_vocabulario)
+        ahora = time.time()
+        if _stats_cache["data"] and (ahora - _stats_cache["ts"]) < STATS_TTL:
+            datos = _stats_cache["data"].copy()
+        else:
+            datos = bd.obtener_estadisticas()
+            datos["vocabulario"] = len(_vocabulario)
+            _stats_cache["data"] = datos
+            _stats_cache["ts"] = ahora
+        datos["entrenando"] = os.path.exists(SIGNAL_RETRAIN)
         return jsonify(datos)
     except Exception as e:
         logger.error(f"Error /stats: {e}")
@@ -448,10 +459,13 @@ def stats():
 @app.route("/api/cerebro")
 def api_cerebro():
     try:
+        ahora = time.time()
+        if _cerebro_cache["data"] and (ahora - _cerebro_cache["ts"]) < CEREBRO_TTL:
+            return jsonify(_cerebro_cache["data"])
+
         temas = bd.obtener_temas_detallados()
         estadisticas = bd.obtener_estadisticas()
 
-        # Calcular conexiones entre temas (palabras compartidas)
         palabras_por_tag = bd.obtener_palabras_por_tag()
         tags_list = list(palabras_por_tag.keys())
         conexiones = []
@@ -461,10 +475,42 @@ def api_cerebro():
                 if len(shared) >= 1:
                     conexiones.append({"from": tags_list[i], "to": tags_list[j], "peso": len(shared)})
 
-        return jsonify({"temas": temas, "estadisticas": estadisticas, "conexiones": conexiones})
+        resultado = {"temas": temas, "estadisticas": estadisticas, "conexiones": conexiones}
+        _cerebro_cache["data"] = resultado
+        _cerebro_cache["ts"] = ahora
+        return jsonify(resultado)
     except Exception as e:
         logger.error(f"Error /api/cerebro: {e}")
         return jsonify({"error": "Error interno"}), 500
+
+
+# ============================================================
+#  SSE: STREAM DE STATS
+# ============================================================
+
+@app.route("/stream/stats")
+def stream_stats():
+    """Server-Sent Events para stats en tiempo real."""
+    def generar():
+        while True:
+            try:
+                ahora = time.time()
+                if _stats_cache["data"] and (ahora - _stats_cache["ts"]) < STATS_TTL:
+                    datos = _stats_cache["data"]
+                else:
+                    datos = bd.obtener_estadisticas()
+                    datos["vocabulario"] = len(_vocabulario)
+                    _stats_cache["data"] = datos
+                    _stats_cache["ts"] = ahora
+                datos_enviar = dict(datos)
+                datos_enviar["entrenando"] = os.path.exists(SIGNAL_RETRAIN)
+                yield f"data: {json.dumps(datos_enviar)}\n\n"
+            except Exception:
+                yield f"data: {{}}\n\n"
+            time.sleep(30)
+
+    return Response(generar(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # ============================================================

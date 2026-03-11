@@ -1,0 +1,26 @@
+[Unit]
+Description=IA Web Server (Gunicorn + gevent)
+After=network.target
+
+[Service]
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/miy_ai
+Environment="PATH=/home/ubuntu/miy_ai/venv/bin"
+ExecStart=/home/ubuntu/miy_ai/venv/bin/gunicorn \
+    --worker-class gevent \
+    --workers 9 \
+    --worker-connections 1000 \
+    --bind 127.0.0.1:5000 \
+    --timeout 120 \
+    --keep-alive 5 \
+    --max-requests 10000 \
+    --max-requests-jitter 1000 \
+    --access-logfile - \
+    --error-logfile - \
+    servidor:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

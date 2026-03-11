@@ -2,6 +2,8 @@
 Auto-aprendizaje nivel maximo.
 Incluye: refuerzo, contexto, feedback, clustering colectivo,
 absorcion de respuestas, decay, limpieza automatica, backups.
+Buffer de patrones via tabla staging en SQLite (no en memoria).
+Sesiones con TTL para evitar memory leaks.
 """
 
 import threading
@@ -19,10 +21,7 @@ UMBRAL_ALTO = 0.85
 UMBRAL_MEDIO = 0.60
 UMBRAL_CONTEXTO = 0.50
 
-INTERVALO_REENTRENAMIENTO = 300     # 5 minutos
-INTERVALO_MANTENIMIENTO = 86400     # 24 horas
-MAX_BUFFER_PATRONES = 20
-MIN_SESIONES_CLUSTERING = 3         # minimo 3 personas diferentes para auto-crear tag
+MIN_SESIONES_CLUSTERING = 3
 
 PALABRAS_POSITIVAS = {
     "jaja", "jajaja", "jajajaja", "si", "sí", "exacto", "buena", "gracias",
@@ -39,7 +38,6 @@ PALABRAS_NEGATIVAS = {
     "te equivocaste", "no no"
 }
 
-# Palabras comunes que se ignoran en clustering
 STOP_WORDS = {
     "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del",
     "en", "y", "o", "a", "al", "es", "que", "por", "para", "con", "se",
@@ -48,35 +46,37 @@ STOP_WORDS = {
 }
 
 # ============================================================
-#  ESTADO EN MEMORIA
+#  SESIONES EN MEMORIA (con TTL y limpieza)
 # ============================================================
 
-_buffer_patrones = []
-_lock_buffer = threading.Lock()
 _sesiones = {}
+_sesiones_ts = {}
 _lock_sesiones = threading.Lock()
-_callback_reentrenar = None
-_entrenamiento_pendiente = False
-_ultimo_mantenimiento = 0
+MAX_SESIONES = 20000
+SESION_TTL = 3600  # 1 hora
 
 
-def registrar_callback_reentrenar(callback):
-    global _callback_reentrenar
-    _callback_reentrenar = callback
+def _limpiar_sesiones_expiradas():
+    """Limpia sesiones con mas de 1 hora de inactividad."""
+    ahora = time.time()
+    if len(_sesiones) < MAX_SESIONES // 2:
+        return
+    expiradas = [k for k, ts in _sesiones_ts.items() if (ahora - ts) > SESION_TTL]
+    for k in expiradas:
+        _sesiones.pop(k, None)
+        _sesiones_ts.pop(k, None)
 
-
-# ============================================================
-#  SESIONES
-# ============================================================
 
 def obtener_estado_sesion(sesion_id):
     with _lock_sesiones:
+        _limpiar_sesiones_expiradas()
         if sesion_id not in _sesiones:
             _sesiones[sesion_id] = {
                 "frase_no_entendida": None,
                 "ultimo_tag": None,
                 "ultima_respuesta_id": None
             }
+        _sesiones_ts[sesion_id] = time.time()
         return _sesiones[sesion_id].copy()
 
 
@@ -89,6 +89,7 @@ def actualizar_sesion(sesion_id, **kwargs):
                 "ultima_respuesta_id": None
             }
         _sesiones[sesion_id].update(kwargs)
+        _sesiones_ts[sesion_id] = time.time()
 
 
 # ============================================================
@@ -112,9 +113,9 @@ def procesar_mensaje(sesion_id, texto_usuario, tag_detectado, confianza, respues
 
     # Refuerzo alto
     if confianza > UMBRAL_ALTO and tag_detectado:
-        _agregar_patron_buffer(tag_detectado, texto_usuario, "auto_refuerzo", confianza)
+        _agregar_patron_staging(tag_detectado, texto_usuario, "auto_refuerzo", confianza)
         if estado["frase_no_entendida"]:
-            _agregar_patron_buffer(tag_detectado, estado["frase_no_entendida"], "auto_contexto", UMBRAL_CONTEXTO)
+            _agregar_patron_staging(tag_detectado, estado["frase_no_entendida"], "auto_contexto", UMBRAL_CONTEXTO)
             actualizar_sesion(sesion_id, frase_no_entendida=None)
         actualizar_sesion(sesion_id, ultimo_tag=tag_detectado, ultima_respuesta_id=respuesta_id)
         return "refuerzo"
@@ -122,7 +123,7 @@ def procesar_mensaje(sesion_id, texto_usuario, tag_detectado, confianza, respues
     # Confianza media
     if confianza > UMBRAL_MEDIO and tag_detectado:
         if estado["frase_no_entendida"]:
-            _agregar_patron_buffer(tag_detectado, estado["frase_no_entendida"], "auto_contexto", UMBRAL_CONTEXTO * 0.7)
+            _agregar_patron_staging(tag_detectado, estado["frase_no_entendida"], "auto_contexto", UMBRAL_CONTEXTO * 0.7)
             actualizar_sesion(sesion_id, frase_no_entendida=None)
         actualizar_sesion(sesion_id, ultimo_tag=tag_detectado, ultima_respuesta_id=respuesta_id)
         return "respuesta_normal"
@@ -139,16 +140,13 @@ def _es_feedback_negativo(t):
     return t in PALABRAS_NEGATIVAS
 
 
-def _agregar_patron_buffer(tag, texto, origen, confianza):
-    global _entrenamiento_pendiente
-    with _lock_buffer:
-        _buffer_patrones.append({"tag": tag, "texto": texto, "origen": origen, "confianza": confianza})
-        if len(_buffer_patrones) >= MAX_BUFFER_PATRONES:
-            _entrenamiento_pendiente = True
+def _agregar_patron_staging(tag, texto, origen, confianza):
+    """Escribe a tabla staging en SQLite en vez de memoria."""
+    bd.agregar_patron_pendiente(tag, texto, origen, confianza)
 
 
 # ============================================================
-#  1.1 — CLUSTERING DE FRASES NO ENTENDIDAS
+#  CLUSTERING DE FRASES NO ENTENDIDAS
 # ============================================================
 
 def clustering_frases_no_entendidas():
@@ -160,7 +158,6 @@ def clustering_frases_no_entendidas():
     if len(frases) < MIN_SESIONES_CLUSTERING:
         return 0
 
-    # Extraer palabras clave por frase (sin stop words)
     grupos = {}
     for f in frases:
         palabras = set(limpiar(f["texto"])) - STOP_WORDS
@@ -176,8 +173,7 @@ def clustering_frases_no_entendidas():
 
     for palabra, info in grupos.items():
         if len(info["sesiones"]) >= MIN_SESIONES_CLUSTERING and palabra not in tags_existentes:
-            # Crear tag con las frases como patrones
-            frases_unicas = list(set(info["frases"]))[:10]  # max 10 patrones iniciales
+            frases_unicas = list(set(info["frases"]))[:10]
             respuesta = f"Me han preguntado mucho sobre {palabra} pero todavia no se que responder. Me ensenas?"
             resultado = bd.crear_intencion_completa(palabra, frases_unicas, [respuesta])
             if resultado is not None:
@@ -189,13 +185,13 @@ def clustering_frases_no_entendidas():
 
 
 # ============================================================
-#  1.2 — ABSORCION DE RESPUESTAS
+#  ABSORCION DE RESPUESTAS
 # ============================================================
 
 def absorber_respuesta(tag, texto_respuesta):
     """
     Extrae palabras clave de una respuesta ensenada y las agrega
-    como patrones debiles del mismo tag. Asi la IA entiende mejor.
+    como patrones debiles del mismo tag.
     """
     palabras = set(limpiar(texto_respuesta)) - STOP_WORDS
     palabras = {p for p in palabras if len(p) > 3}
@@ -209,7 +205,7 @@ def absorber_respuesta(tag, texto_respuesta):
 
 
 # ============================================================
-#  1.3 + 1.4 — MANTENIMIENTO DIARIO
+#  MANTENIMIENTO DIARIO
 # ============================================================
 
 def ejecutar_mantenimiento():
@@ -220,16 +216,15 @@ def ejecutar_mantenimiento():
     3. Desactivar respuestas malas
     4. Archivar intenciones vacias
     5. Clustering de frases no entendidas
-    6. Backup de la base de datos
+    6. Purga de mensajes viejos
+    7. Backup de la base de datos
     """
     print("[mantenimiento] Iniciando mantenimiento diario...")
 
-    # Decay
     afectados = bd.decay_confianza_inactivos(dias=30, factor=0.95)
     if afectados:
         print(f"  [decay] {afectados} patrones con confianza reducida")
 
-    # Limpieza
     eliminados = bd.limpiar_patrones_basura(min_confianza=0.1, dias=60)
     if eliminados:
         print(f"  [limpieza] {eliminados} patrones basura eliminados")
@@ -242,92 +237,16 @@ def ejecutar_mantenimiento():
     if vacias:
         print(f"  [limpieza] {vacias} intenciones vacias archivadas")
 
-    # Clustering
     nuevos_tags = clustering_frases_no_entendidas()
     if nuevos_tags:
         print(f"  [clustering] {nuevos_tags} tags nuevos auto-creados")
 
-    # Backup DB
+    eliminados_msg = bd.purgar_mensajes_viejos(dias=30)
+    if eliminados_msg:
+        print(f"  [purga] {eliminados_msg} mensajes viejos eliminados")
+
     bd.backup_db()
     print("[mantenimiento] Completado.")
 
     return {"decay": afectados, "eliminados": eliminados, "desactivadas": desactivadas,
-            "vacias": vacias, "nuevos_tags": nuevos_tags}
-
-
-# ============================================================
-#  FLUSH Y RE-ENTRENAMIENTO
-# ============================================================
-
-def flush_buffer():
-    global _entrenamiento_pendiente
-    with _lock_buffer:
-        if not _buffer_patrones:
-            return 0
-        patrones = list(_buffer_patrones)
-        _buffer_patrones.clear()
-        _entrenamiento_pendiente = False
-    guardados = 0
-    for p in patrones:
-        if bd.agregar_patron(p["tag"], p["texto"], p["origen"], p["confianza"]):
-            guardados += 1
-    return guardados
-
-
-def hay_entrenamiento_pendiente():
-    with _lock_buffer:
-        return _entrenamiento_pendiente or len(_buffer_patrones) >= MAX_BUFFER_PATRONES
-
-
-# ============================================================
-#  SCHEDULER
-# ============================================================
-
-_scheduler_activo = False
-
-def iniciar_scheduler():
-    global _scheduler_activo, _ultimo_mantenimiento
-    if _scheduler_activo:
-        return
-    _scheduler_activo = True
-    _ultimo_mantenimiento = time.time()
-
-    def loop():
-        global _ultimo_mantenimiento
-        while _scheduler_activo:
-            time.sleep(INTERVALO_REENTRENAMIENTO)
-
-            # Flush + re-entrenar si hay cambios
-            guardados = flush_buffer()
-            if guardados > 0 and _callback_reentrenar:
-                try:
-                    print(f"[auto-aprendizaje] {guardados} patrones nuevos. Re-entrenando...")
-                    _callback_reentrenar()
-                except Exception as e:
-                    print(f"[auto-aprendizaje] Error: {e}")
-
-            # Mantenimiento diario
-            if time.time() - _ultimo_mantenimiento > INTERVALO_MANTENIMIENTO:
-                try:
-                    ejecutar_mantenimiento()
-                    _ultimo_mantenimiento = time.time()
-                    if _callback_reentrenar:
-                        _callback_reentrenar()
-                except Exception as e:
-                    print(f"[mantenimiento] Error: {e}")
-
-    thread = threading.Thread(target=loop, daemon=True, name="scheduler")
-    thread.start()
-    print("  Scheduler activo (re-entrenamiento cada 5 min, mantenimiento diario).")
-
-
-def detener_scheduler():
-    global _scheduler_activo
-    _scheduler_activo = False
-
-
-def forzar_reentrenamiento():
-    guardados = flush_buffer()
-    if _callback_reentrenar:
-        _callback_reentrenar()
-    return guardados
+            "vacias": vacias, "nuevos_tags": nuevos_tags, "mensajes_purgados": eliminados_msg}

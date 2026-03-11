@@ -6,3 +6,5 @@ flask
 gunicorn
 flask-limiter
 flask-cors
+gevent
+schedule

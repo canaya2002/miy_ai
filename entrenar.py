@@ -5,6 +5,7 @@ Incluye: early stopping, epocas adaptativas, backup y validacion.
 
 import string
 import random
+import os
 import numpy as np
 import torch
 import torch.nn as nn
