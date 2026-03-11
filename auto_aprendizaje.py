@@ -1,33 +1,29 @@
 """
-Sistema de auto-aprendizaje.
-La IA aprende automaticamente de cada conversacion sin intervencion humana.
-
-Mecanismos:
-1. Refuerzo automatico: si entiende con alta confianza (>85%), guarda la frase como patron nuevo
-2. Inferencia por contexto: si no entiende algo pero lo siguiente si, asocia ambas frases al mismo tema
-3. Feedback implicito: si el usuario reacciona bien ("jaja", "exacto"), sube el peso de esa respuesta
-4. Re-entrenamiento periodico: cada 5 min o cada 20 patrones nuevos, en un thread de background
+Auto-aprendizaje nivel maximo.
+Incluye: refuerzo, contexto, feedback, clustering colectivo,
+absorcion de respuestas, decay, limpieza automatica, backups.
 """
 
 import threading
 import time
+import re
+from collections import Counter
 import base_datos as bd
-from entrenar import limpiar
+from entrenar import limpiar, similitud_palabras
 
 # ============================================================
 #  CONFIGURACION
 # ============================================================
 
-# Umbrales de confianza para decidir que hacer
-UMBRAL_ALTO = 0.85       # Arriba de esto: refuerzo automatico
-UMBRAL_MEDIO = 0.60      # Arriba de esto: responde pero no aprende
-UMBRAL_CONTEXTO = 0.50   # Confianza asignada a patrones inferidos por contexto
+UMBRAL_ALTO = 0.85
+UMBRAL_MEDIO = 0.60
+UMBRAL_CONTEXTO = 0.50
 
-# Re-entrenamiento automatico
-INTERVALO_REENTRENAMIENTO = 300  # 5 minutos en segundos
-MAX_BUFFER_PATRONES = 20         # Re-entrenar cuando hay 20+ patrones acumulados
+INTERVALO_REENTRENAMIENTO = 300     # 5 minutos
+INTERVALO_MANTENIMIENTO = 86400     # 24 horas
+MAX_BUFFER_PATRONES = 20
+MIN_SESIONES_CLUSTERING = 3         # minimo 3 personas diferentes para auto-crear tag
 
-# Palabras que indican feedback positivo o negativo
 PALABRAS_POSITIVAS = {
     "jaja", "jajaja", "jajajaja", "si", "sí", "exacto", "buena", "gracias",
     "genial", "correcto", "eso", "bien", "perfecto", "nice", "ok", "vale",
@@ -43,39 +39,37 @@ PALABRAS_NEGATIVAS = {
     "te equivocaste", "no no"
 }
 
+# Palabras comunes que se ignoran en clustering
+STOP_WORDS = {
+    "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del",
+    "en", "y", "o", "a", "al", "es", "que", "por", "para", "con", "se",
+    "me", "te", "lo", "le", "mi", "tu", "su", "nos", "como", "mas",
+    "pero", "si", "no", "ya", "hay", "muy", "esta", "esto", "eso"
+}
 
 # ============================================================
-#  ESTADO EN MEMORIA (por sesion, no persistente)
+#  ESTADO EN MEMORIA
 # ============================================================
 
-# Buffer de patrones nuevos pendientes de guardarse en SQLite
 _buffer_patrones = []
 _lock_buffer = threading.Lock()
-
-# Estado de cada sesion activa
-# sesion_id -> {frase_no_entendida, ultimo_tag, ultima_respuesta_id}
 _sesiones = {}
 _lock_sesiones = threading.Lock()
-
-# Callback que el servidor registra para disparar re-entrenamiento
 _callback_reentrenar = None
-
-# Flag de entrenamiento pendiente
 _entrenamiento_pendiente = False
+_ultimo_mantenimiento = 0
 
 
 def registrar_callback_reentrenar(callback):
-    """El servidor registra aqui su funcion de re-entrenamiento"""
     global _callback_reentrenar
     _callback_reentrenar = callback
 
 
 # ============================================================
-#  TRACKING DE SESIONES
+#  SESIONES
 # ============================================================
 
 def obtener_estado_sesion(sesion_id):
-    """Obtiene el estado actual de una sesion (lo crea si no existe)"""
     with _lock_sesiones:
         if sesion_id not in _sesiones:
             _sesiones[sesion_id] = {
@@ -87,7 +81,6 @@ def obtener_estado_sesion(sesion_id):
 
 
 def actualizar_sesion(sesion_id, **kwargs):
-    """Actualiza campos del estado de una sesion"""
     with _lock_sesiones:
         if sesion_id not in _sesiones:
             _sesiones[sesion_id] = {
@@ -99,96 +92,167 @@ def actualizar_sesion(sesion_id, **kwargs):
 
 
 # ============================================================
-#  LOGICA DE AUTO-APRENDIZAJE
+#  AUTO-APRENDIZAJE PRINCIPAL
 # ============================================================
 
 def procesar_mensaje(sesion_id, texto_usuario, tag_detectado, confianza, respuesta_id=None):
-    """
-    Analiza un mensaje y decide si la IA debe aprender algo.
-    Se llama DESPUES de que la IA genera su respuesta.
-
-    Retorna una string indicando que paso:
-    - "feedback_positivo": el usuario reacciono bien a la respuesta anterior
-    - "feedback_negativo": el usuario reacciono mal
-    - "refuerzo": se reforzó un patron con alta confianza
-    - "respuesta_normal": respondio bien pero sin aprender
-    - "no_entendido": no entendio, guardó para inferencia por contexto
-    """
     estado = obtener_estado_sesion(sesion_id)
     texto_limpio = " ".join(limpiar(texto_usuario))
 
-    # --- CASO 1: Detectar feedback del usuario sobre la respuesta anterior ---
+    # Feedback
     if estado["ultima_respuesta_id"]:
         if _es_feedback_positivo(texto_limpio):
             bd.ajustar_peso_respuesta(estado["ultima_respuesta_id"], 0.15)
             actualizar_sesion(sesion_id, ultima_respuesta_id=None)
             return "feedback_positivo"
-
         if _es_feedback_negativo(texto_limpio):
             bd.ajustar_peso_respuesta(estado["ultima_respuesta_id"], -0.15)
             actualizar_sesion(sesion_id, ultima_respuesta_id=None)
             return "feedback_negativo"
 
-    # --- CASO 2: Refuerzo automatico (confianza alta > 85%) ---
+    # Refuerzo alto
     if confianza > UMBRAL_ALTO and tag_detectado:
         _agregar_patron_buffer(tag_detectado, texto_usuario, "auto_refuerzo", confianza)
-
-        # Si habia una frase no entendida antes, inferir que es del mismo tema
         if estado["frase_no_entendida"]:
-            _agregar_patron_buffer(
-                tag_detectado,
-                estado["frase_no_entendida"],
-                "auto_contexto",
-                UMBRAL_CONTEXTO
-            )
+            _agregar_patron_buffer(tag_detectado, estado["frase_no_entendida"], "auto_contexto", UMBRAL_CONTEXTO)
             actualizar_sesion(sesion_id, frase_no_entendida=None)
-
         actualizar_sesion(sesion_id, ultimo_tag=tag_detectado, ultima_respuesta_id=respuesta_id)
         return "refuerzo"
 
-    # --- CASO 3: Confianza media (60-85%) - responde sin aprender ---
+    # Confianza media
     if confianza > UMBRAL_MEDIO and tag_detectado:
-        # Si habia frase no entendida, asociar con confianza baja
         if estado["frase_no_entendida"]:
-            _agregar_patron_buffer(
-                tag_detectado,
-                estado["frase_no_entendida"],
-                "auto_contexto",
-                UMBRAL_CONTEXTO * 0.7
-            )
+            _agregar_patron_buffer(tag_detectado, estado["frase_no_entendida"], "auto_contexto", UMBRAL_CONTEXTO * 0.7)
             actualizar_sesion(sesion_id, frase_no_entendida=None)
-
         actualizar_sesion(sesion_id, ultimo_tag=tag_detectado, ultima_respuesta_id=respuesta_id)
         return "respuesta_normal"
 
-    # --- CASO 4: No entendio (<60%) ---
+    # No entendio
     actualizar_sesion(sesion_id, frase_no_entendida=texto_usuario, ultima_respuesta_id=None)
     return "no_entendido"
 
 
-def _es_feedback_positivo(texto_limpio):
-    """Detecta si el mensaje es una reaccion positiva"""
-    return texto_limpio in PALABRAS_POSITIVAS
+def _es_feedback_positivo(t):
+    return t in PALABRAS_POSITIVAS
 
-
-def _es_feedback_negativo(texto_limpio):
-    """Detecta si el mensaje es una reaccion negativa"""
-    return texto_limpio in PALABRAS_NEGATIVAS
+def _es_feedback_negativo(t):
+    return t in PALABRAS_NEGATIVAS
 
 
 def _agregar_patron_buffer(tag, texto, origen, confianza):
-    """Agrega un patron al buffer de pendientes (se guardara en el proximo flush)"""
     global _entrenamiento_pendiente
     with _lock_buffer:
-        _buffer_patrones.append({
-            "tag": tag,
-            "texto": texto,
-            "origen": origen,
-            "confianza": confianza
-        })
-
+        _buffer_patrones.append({"tag": tag, "texto": texto, "origen": origen, "confianza": confianza})
         if len(_buffer_patrones) >= MAX_BUFFER_PATRONES:
             _entrenamiento_pendiente = True
+
+
+# ============================================================
+#  1.1 — CLUSTERING DE FRASES NO ENTENDIDAS
+# ============================================================
+
+def clustering_frases_no_entendidas():
+    """
+    Agrupa frases no entendidas por palabras clave compartidas.
+    Si 3+ usuarios diferentes preguntan cosas similares, crea un tag automatico.
+    """
+    frases = bd.obtener_frases_no_entendidas(dias=7)
+    if len(frases) < MIN_SESIONES_CLUSTERING:
+        return 0
+
+    # Extraer palabras clave por frase (sin stop words)
+    grupos = {}
+    for f in frases:
+        palabras = set(limpiar(f["texto"])) - STOP_WORDS
+        palabras = {p for p in palabras if len(p) > 2}
+        for palabra in palabras:
+            if palabra not in grupos:
+                grupos[palabra] = {"frases": [], "sesiones": set()}
+            grupos[palabra]["frases"].append(f["texto"])
+            grupos[palabra]["sesiones"].add(f["sesion"])
+
+    creados = 0
+    tags_existentes = set(bd.obtener_estadisticas()["lista_temas"])
+
+    for palabra, info in grupos.items():
+        if len(info["sesiones"]) >= MIN_SESIONES_CLUSTERING and palabra not in tags_existentes:
+            # Crear tag con las frases como patrones
+            frases_unicas = list(set(info["frases"]))[:10]  # max 10 patrones iniciales
+            respuesta = f"Me han preguntado mucho sobre {palabra} pero todavia no se que responder. Me ensenas?"
+            resultado = bd.crear_intencion_completa(palabra, frases_unicas, [respuesta])
+            if resultado is not None:
+                creados += 1
+                tags_existentes.add(palabra)
+                print(f"  [clustering] Tag auto-creado: '{palabra}' ({len(frases_unicas)} patrones)")
+
+    return creados
+
+
+# ============================================================
+#  1.2 — ABSORCION DE RESPUESTAS
+# ============================================================
+
+def absorber_respuesta(tag, texto_respuesta):
+    """
+    Extrae palabras clave de una respuesta ensenada y las agrega
+    como patrones debiles del mismo tag. Asi la IA entiende mejor.
+    """
+    palabras = set(limpiar(texto_respuesta)) - STOP_WORDS
+    palabras = {p for p in palabras if len(p) > 3}
+
+    agregados = 0
+    for palabra in palabras:
+        if bd.agregar_patron(tag, palabra, origen="auto_absorcion", confianza=0.3):
+            agregados += 1
+
+    return agregados
+
+
+# ============================================================
+#  1.3 + 1.4 — MANTENIMIENTO DIARIO
+# ============================================================
+
+def ejecutar_mantenimiento():
+    """
+    Corre una vez al dia:
+    1. Decay de confianza en patrones sin uso
+    2. Limpieza de patrones basura
+    3. Desactivar respuestas malas
+    4. Archivar intenciones vacias
+    5. Clustering de frases no entendidas
+    6. Backup de la base de datos
+    """
+    print("[mantenimiento] Iniciando mantenimiento diario...")
+
+    # Decay
+    afectados = bd.decay_confianza_inactivos(dias=30, factor=0.95)
+    if afectados:
+        print(f"  [decay] {afectados} patrones con confianza reducida")
+
+    # Limpieza
+    eliminados = bd.limpiar_patrones_basura(min_confianza=0.1, dias=60)
+    if eliminados:
+        print(f"  [limpieza] {eliminados} patrones basura eliminados")
+
+    desactivadas = bd.desactivar_respuestas_malas(min_peso=0.2)
+    if desactivadas:
+        print(f"  [limpieza] {desactivadas} respuestas desactivadas")
+
+    vacias = bd.archivar_intenciones_vacias()
+    if vacias:
+        print(f"  [limpieza] {vacias} intenciones vacias archivadas")
+
+    # Clustering
+    nuevos_tags = clustering_frases_no_entendidas()
+    if nuevos_tags:
+        print(f"  [clustering] {nuevos_tags} tags nuevos auto-creados")
+
+    # Backup DB
+    bd.backup_db()
+    print("[mantenimiento] Completado.")
+
+    return {"decay": afectados, "eliminados": eliminados, "desactivadas": desactivadas,
+            "vacias": vacias, "nuevos_tags": nuevos_tags}
 
 
 # ============================================================
@@ -196,10 +260,6 @@ def _agregar_patron_buffer(tag, texto, origen, confianza):
 # ============================================================
 
 def flush_buffer():
-    """
-    Vacia el buffer: guarda los patrones pendientes en SQLite.
-    Devuelve el numero de patrones guardados.
-    """
     global _entrenamiento_pendiente
     with _lock_buffer:
         if not _buffer_patrones:
@@ -207,65 +267,66 @@ def flush_buffer():
         patrones = list(_buffer_patrones)
         _buffer_patrones.clear()
         _entrenamiento_pendiente = False
-
     guardados = 0
     for p in patrones:
         if bd.agregar_patron(p["tag"], p["texto"], p["origen"], p["confianza"]):
             guardados += 1
-
     return guardados
 
 
 def hay_entrenamiento_pendiente():
-    """Indica si hay suficientes patrones nuevos para justificar re-entrenamiento"""
     with _lock_buffer:
         return _entrenamiento_pendiente or len(_buffer_patrones) >= MAX_BUFFER_PATRONES
 
 
 # ============================================================
-#  SCHEDULER DE RE-ENTRENAMIENTO PERIODICO
+#  SCHEDULER
 # ============================================================
 
 _scheduler_activo = False
 
-
 def iniciar_scheduler():
-    """
-    Inicia un thread en background que cada 5 minutos:
-    1. Vacia el buffer de patrones nuevos a SQLite
-    2. Si hubo cambios, dispara re-entrenamiento
-    """
-    global _scheduler_activo
+    global _scheduler_activo, _ultimo_mantenimiento
     if _scheduler_activo:
         return
     _scheduler_activo = True
+    _ultimo_mantenimiento = time.time()
 
     def loop():
+        global _ultimo_mantenimiento
         while _scheduler_activo:
             time.sleep(INTERVALO_REENTRENAMIENTO)
 
+            # Flush + re-entrenar si hay cambios
             guardados = flush_buffer()
-
             if guardados > 0 and _callback_reentrenar:
                 try:
                     print(f"[auto-aprendizaje] {guardados} patrones nuevos. Re-entrenando...")
                     _callback_reentrenar()
                 except Exception as e:
-                    print(f"[auto-aprendizaje] Error al re-entrenar: {e}")
+                    print(f"[auto-aprendizaje] Error: {e}")
 
-    thread = threading.Thread(target=loop, daemon=True, name="scheduler-reentrenamiento")
+            # Mantenimiento diario
+            if time.time() - _ultimo_mantenimiento > INTERVALO_MANTENIMIENTO:
+                try:
+                    ejecutar_mantenimiento()
+                    _ultimo_mantenimiento = time.time()
+                    if _callback_reentrenar:
+                        _callback_reentrenar()
+                except Exception as e:
+                    print(f"[mantenimiento] Error: {e}")
+
+    thread = threading.Thread(target=loop, daemon=True, name="scheduler")
     thread.start()
-    print("  Scheduler de re-entrenamiento activo (cada 5 min).")
+    print("  Scheduler activo (re-entrenamiento cada 5 min, mantenimiento diario).")
 
 
 def detener_scheduler():
-    """Detiene el scheduler"""
     global _scheduler_activo
     _scheduler_activo = False
 
 
 def forzar_reentrenamiento():
-    """Fuerza flush + re-entrenamiento inmediato"""
     guardados = flush_buffer()
     if _callback_reentrenar:
         _callback_reentrenar()
