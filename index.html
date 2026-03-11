@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IA Experimental</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg: #0a0a0f;
+            --surface: #12121a;
+            --surface2: #1a1a25;
+            --border: #2a2a3a;
+            --text: #e0e0e8;
+            --text-dim: #6a6a80;
+            --accent: #00ff88;
+            --accent-dim: #00ff8822;
+            --user-bg: #1e1e30;
+            --ia-bg: #0f1f18;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Space Grotesk', sans-serif;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* HEADER */
+        .header {
+            padding: 16px 24px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: var(--surface);
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo {
+            width: 36px;
+            height: 36px;
+            background: var(--accent);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            color: var(--bg);
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+            animation: pulse 3s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 10px var(--accent-dim); }
+            50% { box-shadow: 0 0 25px var(--accent-dim), 0 0 50px #00ff8811; }
+        }
+
+        .header h1 {
+            font-size: 18px;
+            font-weight: 500;
+            letter-spacing: 0.5px;
+        }
+
+        .header h1 span {
+            color: var(--accent);
+        }
+
+        .stats-btn {
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .stats-btn:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        /* STATS PANEL */
+        .stats-panel {
+            display: none;
+            padding: 12px 24px;
+            background: var(--surface2);
+            border-bottom: 1px solid var(--border);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            gap: 24px;
+        }
+
+        .stats-panel.visible {
+            display: flex;
+        }
+
+        .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .stat-value {
+            color: var(--accent);
+            font-weight: 700;
+            font-size: 16px;
+        }
+
+        .stat-label {
+            color: var(--text-dim);
+        }
+
+        /* CHAT AREA */
+        .chat-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            scroll-behavior: smooth;
+        }
+
+        .chat-area::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .chat-area::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .chat-area::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 3px;
+        }
+
+        /* MENSAJES */
+        .mensaje {
+            max-width: 75%;
+            padding: 14px 18px;
+            border-radius: 16px;
+            line-height: 1.5;
+            font-size: 15px;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .mensaje.usuario {
+            align-self: flex-end;
+            background: var(--user-bg);
+            border: 1px solid var(--border);
+            border-bottom-right-radius: 4px;
+        }
+
+        .mensaje.ia {
+            align-self: flex-start;
+            background: var(--ia-bg);
+            border: 1px solid #1a3a2a;
+            border-bottom-left-radius: 4px;
+        }
+
+        .mensaje .etiqueta {
+            font-size: 11px;
+            font-family: 'JetBrains Mono', monospace;
+            margin-bottom: 6px;
+            display: block;
+        }
+
+        .mensaje.usuario .etiqueta { color: var(--text-dim); }
+        .mensaje.ia .etiqueta { color: var(--accent); }
+
+        .mensaje .confianza {
+            font-size: 10px;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-dim);
+            margin-top: 6px;
+        }
+
+        /* BIENVENIDA */
+        .bienvenida {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-dim);
+        }
+
+        .bienvenida h2 {
+            font-size: 28px;
+            color: var(--text);
+            margin-bottom: 12px;
+        }
+
+        .bienvenida h2 span { color: var(--accent); }
+
+        .bienvenida p {
+            font-size: 15px;
+            max-width: 500px;
+            margin: 0 auto;
+            line-height: 1.6;
+        }
+
+        /* PANEL ENSENAR */
+        .ensenar-panel {
+            display: none;
+            align-self: flex-start;
+            max-width: 85%;
+            background: var(--surface2);
+            border: 1px solid var(--accent);
+            border-radius: 16px;
+            padding: 18px;
+            animation: fadeIn 0.3s ease;
+        }
+
+        .ensenar-panel.visible { display: block; }
+
+        .ensenar-panel h3 {
+            font-size: 14px;
+            color: var(--accent);
+            margin-bottom: 12px;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .ensenar-panel label {
+            font-size: 13px;
+            color: var(--text-dim);
+            display: block;
+            margin-bottom: 4px;
+            margin-top: 10px;
+        }
+
+        .ensenar-panel input, .ensenar-panel select {
+            width: 100%;
+            padding: 10px 12px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 14px;
+            outline: none;
+        }
+
+        .ensenar-panel input:focus, .ensenar-panel select:focus {
+            border-color: var(--accent);
+        }
+
+        .ensenar-btns {
+            display: flex;
+            gap: 8px;
+            margin-top: 14px;
+        }
+
+        .btn-ensenar {
+            flex: 1;
+            padding: 10px;
+            border-radius: 8px;
+            border: none;
+            cursor: pointer;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+
+        .btn-ensenar.confirmar {
+            background: var(--accent);
+            color: var(--bg);
+            font-weight: 700;
+        }
+
+        .btn-ensenar.confirmar:hover { opacity: 0.85; }
+
+        .btn-ensenar.cancelar {
+            background: var(--surface);
+            color: var(--text-dim);
+            border: 1px solid var(--border);
+        }
+
+        .btn-ensenar.cancelar:hover { border-color: var(--text-dim); }
+
+        /* INPUT AREA */
+        .input-area {
+            padding: 16px 24px;
+            border-top: 1px solid var(--border);
+            background: var(--surface);
+            display: flex;
+            gap: 12px;
+        }
+
+        .input-area input {
+            flex: 1;
+            padding: 14px 18px;
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            color: var(--text);
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 15px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .input-area input:focus { border-color: var(--accent); }
+
+        .input-area input::placeholder { color: var(--text-dim); }
+
+        .btn-enviar {
+            padding: 14px 24px;
+            background: var(--accent);
+            color: var(--bg);
+            border: none;
+            border-radius: 12px;
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 700;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-enviar:hover { opacity: 0.85; transform: scale(1.02); }
+        .btn-enviar:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+        /* LOADING */
+        .loading {
+            display: none;
+            align-self: flex-start;
+            padding: 14px 18px;
+            background: var(--ia-bg);
+            border: 1px solid #1a3a2a;
+            border-radius: 16px;
+            border-bottom-left-radius: 4px;
+            animation: fadeIn 0.3s ease;
+        }
+
+        .loading.visible { display: block; }
+
+        .dots span {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background: var(--accent);
+            border-radius: 50%;
+            margin: 0 2px;
+            animation: bounce 1.4s infinite both;
+        }
+
+        .dots span:nth-child(2) { animation-delay: 0.16s; }
+        .dots span:nth-child(3) { animation-delay: 0.32s; }
+
+        @keyframes bounce {
+            0%, 80%, 100% { transform: scale(0.5); opacity: 0.3; }
+            40% { transform: scale(1); opacity: 1; }
+        }
+
+        /* ENTRENANDO */
+        .entrenando {
+            display: none;
+            align-self: flex-start;
+            padding: 14px 18px;
+            background: #1a1a0f;
+            border: 1px solid #3a3a1a;
+            border-radius: 16px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            color: #ffcc00;
+            animation: fadeIn 0.3s ease;
+        }
+
+        .entrenando.visible { display: block; }
+
+        @media (max-width: 600px) {
+            .mensaje { max-width: 90%; }
+            .ensenar-panel { max-width: 95%; }
+            .header h1 { font-size: 15px; }
+            .stats-panel { flex-wrap: wrap; gap: 12px; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- HEADER -->
+    <div class="header">
+        <div class="header-left">
+            <div class="logo">IA</div>
+            <h1>IA <span>Experimental</span></h1>
+        </div>
+        <button class="stats-btn" onclick="toggleStats()">STATS</button>
+    </div>
+
+    <!-- STATS -->
+    <div class="stats-panel" id="statsPanel">
+        <div class="stat-item">
+            <span class="stat-value" id="statTemas">-</span>
+            <span class="stat-label">temas</span>
+        </div>
+        <div class="stat-item">
+            <span class="stat-value" id="statPatrones">-</span>
+            <span class="stat-label">patrones</span>
+        </div>
+        <div class="stat-item">
+            <span class="stat-value" id="statRespuestas">-</span>
+            <span class="stat-label">respuestas</span>
+        </div>
+        <div class="stat-item">
+            <span class="stat-value" id="statVocab">-</span>
+            <span class="stat-label">palabras</span>
+        </div>
+    </div>
+
+    <!-- CHAT -->
+    <div class="chat-area" id="chatArea">
+        <div class="bienvenida">
+            <h2>IA <span>Experimental</span></h2>
+            <p>Esta IA fue creada desde cero. No sabe nada que no le hayan ensenado. Si no entiende algo, te va a pedir que le ensenes. Entre todos la hacemos mas inteligente.</p>
+        </div>
+    </div>
+
+    <!-- INPUT -->
+    <div class="input-area">
+        <input type="text" id="inputMensaje" placeholder="Escribe algo..." autocomplete="off">
+        <button class="btn-enviar" id="btnEnviar" onclick="enviar()">ENVIAR</button>
+    </div>
+
+    <script>
+        const chatArea = document.getElementById('chatArea');
+        const inputMsg = document.getElementById('inputMensaje');
+        const btnEnviar = document.getElementById('btnEnviar');
+
+        let ultimaFrase = '';  // guarda lo ultimo que no entendio
+        let esperandoEnsenar = false;
+
+        // Enter para enviar
+        inputMsg.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !btnEnviar.disabled) enviar();
+        });
+
+        // Scroll al fondo
+        function scrollAbajo() {
+            chatArea.scrollTop = chatArea.scrollHeight;
+        }
+
+        // Agregar mensaje al chat
+        function agregarMensaje(texto, tipo, confianza = null) {
+            const div = document.createElement('div');
+            div.className = `mensaje ${tipo}`;
+
+            const etiqueta = tipo === 'usuario' ? 'Tu' : 'IA';
+            let html = `<span class="etiqueta">${etiqueta}</span>${texto}`;
+            if (confianza !== null && tipo === 'ia') {
+                html += `<div class="confianza">${confianza}% confianza</div>`;
+            }
+
+            div.innerHTML = html;
+            chatArea.appendChild(div);
+            scrollAbajo();
+        }
+
+        // Mostrar loading
+        function mostrarLoading(visible) {
+            let el = document.getElementById('loadingDots');
+            if (!el) {
+                el = document.createElement('div');
+                el.className = 'loading';
+                el.id = 'loadingDots';
+                el.innerHTML = '<div class="dots"><span></span><span></span><span></span></div>';
+                chatArea.appendChild(el);
+            }
+            el.className = visible ? 'loading visible' : 'loading';
+            if (visible) scrollAbajo();
+        }
+
+        // Mostrar panel de ensenar
+        function mostrarPanelEnsenar(frase) {
+            // Quitar panel anterior si existe
+            const anterior = document.getElementById('panelEnsenar');
+            if (anterior) anterior.remove();
+
+            const div = document.createElement('div');
+            div.className = 'ensenar-panel visible';
+            div.id = 'panelEnsenar';
+
+            // Cargar temas existentes
+            fetch('/stats')
+                .then(r => r.json())
+                .then(stats => {
+                    let opcionesTemas = '<option value="__nuevo__">-- Tema NUEVO --</option>';
+                    stats.lista_temas.forEach(t => {
+                        opcionesTemas += `<option value="${t}">${t}</option>`;
+                    });
+
+                    div.innerHTML = `
+                        <h3>// MODO APRENDIZAJE</h3>
+                        <p style="font-size:13px;color:var(--text-dim);margin-bottom:8px;">
+                            No entendi: "${frase}"
+                        </p>
+
+                        <label>Esto es sobre:</label>
+                        <select id="selectTema" onchange="toggleNuevoTema()">
+                            ${opcionesTemas}
+                        </select>
+
+                        <div id="nuevoTemaWrap">
+                            <label>Nombre del tema nuevo (una palabra):</label>
+                            <input type="text" id="inputNuevoTema" placeholder="ej: musica, deportes, clima...">
+                        </div>
+
+                        <label>Como deberia responder la IA:</label>
+                        <input type="text" id="inputRespuesta" placeholder="Escribe la respuesta que quieres que aprenda">
+
+                        <div class="ensenar-btns">
+                            <button class="btn-ensenar cancelar" onclick="cancelarEnsenar()">CANCELAR</button>
+                            <button class="btn-ensenar confirmar" onclick="confirmarEnsenar('${frase.replace(/'/g, "\\'")}')">ENSENAR</button>
+                        </div>
+                    `;
+
+                    chatArea.appendChild(div);
+                    scrollAbajo();
+                });
+        }
+
+        function toggleNuevoTema() {
+            const select = document.getElementById('selectTema');
+            const wrap = document.getElementById('nuevoTemaWrap');
+            wrap.style.display = select.value === '__nuevo__' ? 'block' : 'none';
+        }
+
+        function cancelarEnsenar() {
+            const panel = document.getElementById('panelEnsenar');
+            if (panel) panel.remove();
+            esperandoEnsenar = false;
+            agregarMensaje('Ok, no hay problema.', 'ia');
+        }
+
+        async function confirmarEnsenar(frase) {
+            const select = document.getElementById('selectTema');
+            const esNuevo = select.value === '__nuevo__';
+            const tag = esNuevo
+                ? document.getElementById('inputNuevoTema').value.trim().toLowerCase()
+                : select.value;
+            const respuesta = document.getElementById('inputRespuesta').value.trim();
+
+            if (!tag) {
+                alert('Escribe el nombre del tema');
+                return;
+            }
+            if (!respuesta) {
+                alert('Escribe una respuesta para la IA');
+                return;
+            }
+
+            // Quitar panel
+            const panel = document.getElementById('panelEnsenar');
+            if (panel) panel.remove();
+
+            // Mostrar entrenando
+            const entDiv = document.createElement('div');
+            entDiv.className = 'entrenando visible';
+            entDiv.id = 'entrenandoMsg';
+            entDiv.textContent = '>> Re-entrenando cerebro...';
+            chatArea.appendChild(entDiv);
+            scrollAbajo();
+
+            try {
+                const res = await fetch('/ensenar', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        frase: frase,
+                        tag: tag,
+                        respuesta: respuesta,
+                        es_nuevo: esNuevo
+                    })
+                });
+
+                const data = await res.json();
+                entDiv.remove();
+
+                if (data.ok) {
+                    agregarMensaje(`Aprendido! Ahora se sobre "${tag}". Pruebame.`, 'ia');
+                    cargarStats();
+                } else {
+                    agregarMensaje('Hmm, algo fallo al aprender. Intenta de nuevo.', 'ia');
+                }
+            } catch (err) {
+                entDiv.remove();
+                agregarMensaje('Error de conexion al entrenar.', 'ia');
+            }
+
+            esperandoEnsenar = false;
+        }
+
+        // ENVIAR MENSAJE
+        async function enviar() {
+            const texto = inputMsg.value.trim();
+            if (!texto) return;
+
+            agregarMensaje(texto, 'usuario');
+            inputMsg.value = '';
+            btnEnviar.disabled = true;
+            mostrarLoading(true);
+
+            try {
+                const res = await fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mensaje: texto })
+                });
+
+                const data = await res.json();
+                mostrarLoading(false);
+
+                if (data.entendio) {
+                    agregarMensaje(data.respuesta, 'ia', data.confianza);
+                } else {
+                    agregarMensaje(data.respuesta, 'ia', data.confianza);
+                    mostrarPanelEnsenar(texto);
+                    esperandoEnsenar = true;
+                }
+            } catch (err) {
+                mostrarLoading(false);
+                agregarMensaje('Error de conexion con el servidor.', 'ia');
+            }
+
+            btnEnviar.disabled = false;
+            inputMsg.focus();
+        }
+
+        // STATS
+        function toggleStats() {
+            const panel = document.getElementById('statsPanel');
+            panel.classList.toggle('visible');
+            if (panel.classList.contains('visible')) cargarStats();
+        }
+
+        async function cargarStats() {
+            try {
+                const res = await fetch('/stats');
+                const data = await res.json();
+                document.getElementById('statTemas').textContent = data.temas;
+                document.getElementById('statPatrones').textContent = data.patrones;
+                document.getElementById('statRespuestas').textContent = data.respuestas;
+                document.getElementById('statVocab').textContent = data.vocabulario;
+            } catch (err) {}
+        }
+
+        // Cargar stats al inicio
+        cargarStats();
+        inputMsg.focus();
+    </script>
+</body>
+</html>

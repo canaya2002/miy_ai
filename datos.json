@@ -1,0 +1,124 @@
+{
+  "intenciones": [
+    {
+      "tag": "saludo",
+      "patrones": [
+        "hola",
+        "hey",
+        "que tal",
+        "buenos dias",
+        "buenas tardes",
+        "buenas noches",
+        "que onda",
+        "como estas"
+      ],
+      "respuestas": [
+        "Hola! Como estas?",
+        "Hey! Que gusto verte por aqui.",
+        "Hola! En que te puedo ayudar?",
+        "Que tal! Aqui andamos."
+      ]
+    },
+    {
+      "tag": "despedida",
+      "patrones": [
+        "adios",
+        "bye",
+        "nos vemos",
+        "hasta luego",
+        "me voy",
+        "chao"
+      ],
+      "respuestas": [
+        "Hasta luego! Cuidate.",
+        "Nos vemos! Fue un gusto.",
+        "Bye! Vuelve cuando quieras.",
+        "Adios! Que te vaya bien."
+      ]
+    },
+    {
+      "tag": "nombre",
+      "patrones": [
+        "como te llamas",
+        "cual es tu nombre",
+        "quien eres",
+        "que eres"
+      ],
+      "respuestas": [
+        "Soy una IA creada desde cero. No tengo nombre todavia, tu ponme uno!",
+        "Me puedes llamar como quieras, soy tu IA.",
+        "Soy una red neuronal entrenada por ti."
+      ]
+    },
+    {
+      "tag": "capacidades",
+      "patrones": [
+        "que puedes hacer",
+        "que sabes hacer",
+        "para que sirves",
+        "como funcionas"
+      ],
+      "respuestas": [
+        "Puedo responder lo que me enseñes. Mientras mas datos me des, mas aprendo.",
+        "Funciono con una red neuronal. Aprendo de los patrones que tu me das.",
+        "Soy tan inteligente como los datos que me des para entrenar."
+      ]
+    },
+    {
+      "tag": "estado",
+      "patrones": [
+        "como te sientes",
+        "estas bien",
+        "que haces",
+        "todo bien"
+      ],
+      "respuestas": [
+        "Aqui, procesando neuronas! Todo bien.",
+        "Funcionando al 100%. Y tu?",
+        "Bien! Listo para platicar."
+      ]
+    },
+    {
+      "tag": "agradecimiento",
+      "patrones": [
+        "gracias",
+        "te lo agradezco",
+        "muchas gracias",
+        "mil gracias"
+      ],
+      "respuestas": [
+        "De nada! Para eso estoy.",
+        "No hay de que!",
+        "Con gusto!"
+      ]
+    },
+    {
+      "tag": "humor",
+      "patrones": [
+        "cuentame un chiste",
+        "dime algo gracioso",
+        "hazme reir",
+        "sabes chistes"
+      ],
+      "respuestas": [
+        "Por que el libro de matematicas estaba triste? Porque tenia muchos problemas.",
+        "Que le dijo un bit al otro? Nos vemos en el bus.",
+        "Como se despiden los quimicos? Acido un placer."
+      ]
+    },
+    {
+      "tag": "creador",
+      "patrones": [
+        "quien te creo",
+        "quien te hizo",
+        "quien te programo",
+        "quien es tu creador"
+      ],
+      "respuestas": [
+        "Tu me creaste! Soy tu proyecto de IA desde cero.",
+        "Mi creador eres tu. Cada dato que me das me hace mas inteligente.",
+        "Fui creada por ti, con Python y PyTorch."
+      ]
+    }
+  ]
+}

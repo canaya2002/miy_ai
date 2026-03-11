@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: mi-ia
+    runtime: python
+    buildCommand: pip install torch --index-url https://download.pytorch.org/whl/cpu && pip install -r requirements.txt
+    startCommand: gunicorn servidor:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+    disk:
+      name: datos-ia
+      mountPath: /data
+      sizeGB: 1

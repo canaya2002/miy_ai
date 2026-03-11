@@ -1,0 +1,5 @@
+numpy
+flask
+gunicorn
+flask-limiter
+flask-cors
