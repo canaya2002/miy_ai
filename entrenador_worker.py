@@ -1,7 +1,7 @@
 """
 Worker dedicado de entrenamiento.
 Corre como proceso separado. Vigila signal files y tabla staging.
-Ejecuta mantenimiento diario.
+Ejecuta mantenimiento diario, VACUUM semanal, auto-ajuste de hiperparametros.
 """
 
 import os
@@ -9,6 +9,7 @@ import time
 import logging
 import sys
 import schedule
+import datetime
 
 import base_datos as bd
 import entrenar
@@ -26,16 +27,17 @@ _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SIGNAL_RETRAIN = os.path.join(_BASE_DIR, "NEEDS_RETRAIN")
 SIGNAL_UPDATED = os.path.join(_BASE_DIR, "MODEL_UPDATED")
 
-MIN_INTERVALO_RETRAIN = 120  # minimo 2 min entre reentrenamientos
+MIN_INTERVALO_RETRAIN = 120
 _ultimo_retrain = 0
+_patrones_nuevos_desde_ultimo = 0
+UMBRAL_REENTRENAMIENTO_COMPLETO = 50
 
 
 # ============================================================
-#  FLUSH PATRONES PENDIENTES (staging → patrones reales)
+#  FLUSH PATRONES PENDIENTES (staging -> patrones reales)
 # ============================================================
 
 def flush_patrones_pendientes():
-    """Mueve patrones de la tabla staging a la tabla real."""
     conn = bd.conectar()
     pendientes = conn.execute("SELECT id, tag, texto, origen, confianza FROM patrones_pendientes").fetchall()
     if not pendientes:
@@ -61,12 +63,11 @@ def flush_patrones_pendientes():
 
 
 # ============================================================
-#  REENTRENAMIENTO
+#  REENTRENAMIENTO (con soporte incremental)
 # ============================================================
 
 def verificar_y_reentrenar():
-    """Verifica si hay signal de reentrenamiento y ejecuta."""
-    global _ultimo_retrain
+    global _ultimo_retrain, _patrones_nuevos_desde_ultimo
 
     ahora = time.time()
     if ahora - _ultimo_retrain < MIN_INTERVALO_RETRAIN:
@@ -82,29 +83,46 @@ def verificar_y_reentrenar():
 
     logger.info("Signal de reentrenamiento detectada.")
 
-    # Flush staging primero
-    flush_patrones_pendientes()
+    # Flush staging y promover confirmados
+    procesados = flush_patrones_pendientes()
+    bd.promover_patrones_confirmados(min_confirmaciones=2)
+    _patrones_nuevos_desde_ultimo += procesados
 
-    # Reentrenar
+    # Decidir: incremental o completo
     try:
-        logger.info("Entrenando modelo...")
+        if _patrones_nuevos_desde_ultimo < UMBRAL_REENTRENAMIENTO_COMPLETO:
+            logger.info("Intentando entrenamiento incremental...")
+            resultado = entrenar.entrenar_incremental(verbose=True)
+            if resultado:
+                _ultimo_retrain = time.time()
+                _patrones_nuevos_desde_ultimo = 0
+                _signal_updated()
+                return
+
+        logger.info("Entrenamiento completo...")
         entrenar.entrenar_modelo(verbose=True)
         _ultimo_retrain = time.time()
+        _patrones_nuevos_desde_ultimo = 0
+        _signal_updated()
 
-        # Signal al servidor para hot-reload
-        with open(SIGNAL_UPDATED, "w") as f:
-            f.write(str(time.time()))
-        logger.info("Entrenamiento completado. Signal MODEL_UPDATED escrita.")
     except Exception as e:
         logger.error(f"Error en reentrenamiento: {e}")
 
 
+def _signal_updated():
+    try:
+        with open(SIGNAL_UPDATED, "w") as f:
+            f.write(str(time.time()))
+        logger.info("Entrenamiento completado. Signal MODEL_UPDATED escrita.")
+    except Exception:
+        pass
+
+
 # ============================================================
-#  MANTENIMIENTO DIARIO
+#  MANTENIMIENTO DIARIO (4:00 AM)
 # ============================================================
 
 def mantenimiento_diario():
-    """Ejecuta todas las tareas de mantenimiento."""
     logger.info("Iniciando mantenimiento diario...")
     flush_patrones_pendientes()
     resultado = auto.ejecutar_mantenimiento()
@@ -113,11 +131,52 @@ def mantenimiento_diario():
     # Reentrenar despues del mantenimiento
     try:
         entrenar.entrenar_modelo(verbose=True)
-        with open(SIGNAL_UPDATED, "w") as f:
-            f.write(str(time.time()))
+        _signal_updated()
         logger.info("Reentrenamiento post-mantenimiento OK.")
     except Exception as e:
         logger.error(f"Error reentrenamiento post-mantenimiento: {e}")
+
+
+# ============================================================
+#  AUTO-AJUSTE DE HIPERPARAMETROS (diario 5:00 AM)
+# ============================================================
+
+def ajuste_hiperparametros():
+    logger.info("Iniciando auto-ajuste de hiperparametros...")
+    try:
+        resultado = entrenar.auto_ajustar_hiperparametros(verbose=True)
+        if resultado:
+            logger.info(f"Mejores hiperparametros: {resultado}")
+        else:
+            logger.info("No se encontraron mejores hiperparametros (datos insuficientes).")
+    except Exception as e:
+        logger.error(f"Error en auto-ajuste: {e}")
+
+
+# ============================================================
+#  VACUUM SEMANAL (domingos 3:00 AM)
+# ============================================================
+
+def vacuum_semanal():
+    logger.info("Ejecutando VACUUM semanal...")
+    try:
+        bd.vacuum_db()
+        logger.info("VACUUM completado.")
+    except Exception as e:
+        logger.error(f"Error en VACUUM: {e}")
+
+
+# ============================================================
+#  LOG SEMANAL
+# ============================================================
+
+def log_semanal():
+    logger.info("Exportando log semanal...")
+    try:
+        linea = bd.exportar_log_semanal()
+        logger.info(f"Log: {linea.strip()}")
+    except Exception as e:
+        logger.error(f"Error exportando log: {e}")
 
 
 # ============================================================
@@ -131,10 +190,14 @@ def main():
 
     bd.crear_tablas()
 
-    # Programar mantenimiento diario a las 4:00 AM
+    # Programar tareas
     schedule.every().day.at("04:00").do(mantenimiento_diario)
+    schedule.every().day.at("05:00").do(ajuste_hiperparametros)
+    schedule.every().sunday.at("03:00").do(vacuum_semanal)
+    schedule.every().sunday.at("03:30").do(log_semanal)
 
-    logger.info("Vigilando signals cada 30s. Mantenimiento programado a las 04:00.")
+    logger.info("Vigilando signals cada 30s.")
+    logger.info("Mantenimiento: 04:00 | Hiperparametros: 05:00 | VACUUM: dom 03:00")
 
     while True:
         try:

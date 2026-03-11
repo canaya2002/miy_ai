@@ -1,6 +1,6 @@
 """
-Servidor de produccion: seguridad, SEO, cache, monitoreo.
-Optimizado para 10K usuarios con gevent workers.
+Servidor de produccion: seguridad, SEO, cache, monitoreo, adaptive throttling.
+Optimizado para miles de usuarios con gevent workers.
 Compresion GZIP delegada a Nginx. Entrenamiento delegado a entrenador_worker.
 """
 
@@ -17,6 +17,7 @@ import os
 import sys
 import time
 import json
+import hashlib
 import torch
 from collections import OrderedDict
 
@@ -43,7 +44,7 @@ logger = logging.getLogger(__name__)
 _inicio_servidor = time.time()
 
 # ============================================================
-#  SIGNAL FILES (comunicacion con entrenador_worker)
+#  SIGNAL FILES
 # ============================================================
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -52,7 +53,6 @@ SIGNAL_UPDATED = os.path.join(_BASE_DIR, "MODEL_UPDATED")
 
 
 def solicitar_reentrenamiento():
-    """Escribe signal file para que el worker reentrene."""
     try:
         with open(SIGNAL_RETRAIN, "w") as f:
             f.write(str(time.time()))
@@ -61,7 +61,6 @@ def solicitar_reentrenamiento():
 
 
 def verificar_modelo_actualizado():
-    """Si el worker actualizo el modelo, recargarlo en caliente."""
     if os.path.exists(SIGNAL_UPDATED):
         try:
             os.remove(SIGNAL_UPDATED)
@@ -70,6 +69,50 @@ def verificar_modelo_actualizado():
             logger.info("Modelo recargado en caliente.")
         except Exception as e:
             logger.error(f"Error recargando modelo: {e}")
+
+
+# ============================================================
+#  ADAPTIVE THROTTLING
+# ============================================================
+
+_sesiones_activas = {}
+_sesiones_activas_lock = threading.Lock()
+VENTANA_ACTIVIDAD = 300  # 5 minutos
+
+
+def _registrar_actividad(sesion_id):
+    with _sesiones_activas_lock:
+        _sesiones_activas[sesion_id] = time.time()
+
+
+def _contar_usuarios_activos():
+    ahora = time.time()
+    with _sesiones_activas_lock:
+        # Limpiar viejos
+        expirados = [k for k, v in _sesiones_activas.items() if ahora - v > VENTANA_ACTIVIDAD]
+        for k in expirados:
+            del _sesiones_activas[k]
+        return len(_sesiones_activas)
+
+
+def _obtener_limite_chat():
+    activos = _contar_usuarios_activos()
+    if activos < 20:
+        return "60 per minute"
+    elif activos < 100:
+        return "30 per minute"
+    return "15 per minute"
+
+
+# Adaptive cache TTLs
+def _stats_ttl():
+    activos = _contar_usuarios_activos()
+    return 60 if activos > 50 else 30
+
+
+def _cerebro_ttl():
+    activos = _contar_usuarios_activos()
+    return 120 if activos > 50 else 60
 
 
 # ============================================================
@@ -108,7 +151,7 @@ def security_headers(response):
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
     response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=()'
     csp = ("default-src 'self'; "
-           "script-src 'self' 'unsafe-inline'; "
+           "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://api.fontshare.com; "
            "font-src https://fonts.gstatic.com https://cdn.fontshare.com; "
            "connect-src 'self'; "
@@ -118,21 +161,18 @@ def security_headers(response):
 
 
 # ============================================================
-#  CACHE DE RESPUESTAS (stats y cerebro)
+#  CACHE
 # ============================================================
 
-_stats_cache = {"data": None, "ts": 0}
-_cerebro_cache = {"data": None, "ts": 0}
-STATS_TTL = 30
-CEREBRO_TTL = 60
-
+_stats_cache = {"data": None, "ts": 0, "etag": ""}
+_cerebro_cache = {"data": None, "ts": 0, "etag": ""}
 
 # ============================================================
-#  CACHE DE CLASIFICACION
+#  CACHE DE CLASIFICACION (5000 entradas)
 # ============================================================
 
 _cache = OrderedDict()
-_cache_max = 1000
+_cache_max = 5000
 _lock_cache = threading.Lock()
 
 
@@ -143,6 +183,10 @@ def clasificar_con_cache(texto_normalizado, modelo, vocabulario, tags):
             return _cache[texto_normalizado]
 
     palabras = entrenar.limpiar(texto_normalizado)
+    # Aplicar sinonimos
+    mapa_sin = bd.obtener_sinonimos()
+    palabras = entrenar.aplicar_sinonimos(palabras, mapa_sin)
+
     bolsa = entrenar.bolsa_de_palabras(palabras, vocabulario, flexible=True)
     tensor = torch.FloatTensor(bolsa).unsqueeze(0)
 
@@ -161,9 +205,15 @@ def clasificar_con_cache(texto_normalizado, modelo, vocabulario, tags):
     return tag, confianza
 
 
-def invalidar_cache():
+def invalidar_cache(tag=None):
+    """Invalida todo el cache, o solo entradas de un tag."""
     with _lock_cache:
-        _cache.clear()
+        if tag is None:
+            _cache.clear()
+        else:
+            to_remove = [k for k, v in _cache.items() if v[0] == tag]
+            for k in to_remove:
+                del _cache[k]
 
 
 # ============================================================
@@ -209,7 +259,7 @@ def inicializar():
 
 
 # ============================================================
-#  BEFORE REQUEST: flush mensajes + hot-reload modelo
+#  BEFORE REQUEST
 # ============================================================
 
 _last_model_check = 0
@@ -254,6 +304,10 @@ def respuesta_con_cookie(data, sesion_id, status=200):
     return resp
 
 
+def _generar_etag(data):
+    return hashlib.md5(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
+
+
 # ============================================================
 #  PAGINAS
 # ============================================================
@@ -268,7 +322,7 @@ def pagina_cerebro():
 
 
 # ============================================================
-#  SEO: SITEMAP, ROBOTS, MANIFEST
+#  SEO
 # ============================================================
 
 @app.route("/robots.txt")
@@ -296,8 +350,8 @@ def manifest():
         "short_name": "IA",
         "start_url": "/",
         "display": "standalone",
-        "background_color": "#050508",
-        "theme_color": "#050508",
+        "background_color": "#06060c",
+        "theme_color": "#06060c",
         "description": "IA conversacional que aprende de cada persona"
     })
 
@@ -315,6 +369,7 @@ def health():
         "uptime_seconds": uptime,
         "modelo_cargado": _modelo is not None,
         "entrenando": os.path.exists(SIGNAL_RETRAIN),
+        "usuarios_activos": _contar_usuarios_activos(),
         **info
     })
 
@@ -324,12 +379,14 @@ def health():
 # ============================================================
 
 @app.route("/chat", methods=["POST"])
-@limiter.limit("30 per minute")
+@limiter.limit(lambda: _obtener_limite_chat())
 def chat():
     try:
         sesion_id, es_nueva = obtener_sesion()
         if es_nueva:
             bd.registrar_sesion_nueva()
+
+        _registrar_actividad(sesion_id)
 
         raw = request.json.get("mensaje", "") if request.json else ""
         mensaje = sanitizar(raw, max_largo=500)
@@ -343,7 +400,6 @@ def chat():
                 "entendio": False, "confianza": 0
             }, sesion_id)
 
-        # Clasificar (con cache)
         texto_norm = mensaje.lower().strip()
         tag, confianza = clasificar_con_cache(texto_norm, modelo, vocabulario, tags)
 
@@ -364,7 +420,7 @@ def chat():
         else:
             texto_resp = "No entendi eso. Quieres ensenarme?"
             bd.guardar_mensaje(sesion_id, "ia", texto_resp, None, confianza)
-            auto.procesar_mensaje(sesion_id, mensaje, None, confianza)
+            auto.procesar_mensaje(sesion_id, mensaje, tag if confianza > 0.3 else None, confianza)
             return respuesta_con_cookie({
                 "respuesta": texto_resp, "entendio": False,
                 "confianza": round(confianza * 100, 1)
@@ -388,7 +444,6 @@ def ensenar_ruta():
         tag = sanitizar(info.get("tag", ""), max_largo=50)
         respuesta = sanitizar(info.get("respuesta", ""), max_largo=500)
 
-        # Validaciones de seguridad
         tag = "".join(c for c in tag.lower() if c.isalnum() or c in "-_ ").strip().replace(" ", "_")
         if not frase or not tag:
             return jsonify({"ok": False, "error": "Faltan datos"})
@@ -397,20 +452,17 @@ def ensenar_ruta():
         if len(frase) < 2:
             return jsonify({"ok": False, "error": "La frase es muy corta"})
 
-        # Filtro de contenido
         if not contenido_permitido(frase):
             return jsonify({"ok": False, "error": "Contenido no permitido en la frase"})
         if respuesta and not contenido_permitido(respuesta):
             return jsonify({"ok": False, "error": "Contenido no permitido en la respuesta"})
 
-        # Verificar limites
         limites = bd.verificar_limites_ensenanza(tag)
         if limites["intenciones_lleno"]:
             return jsonify({"ok": False, "error": "La IA ya sabe demasiados temas. No puede aprender mas por ahora."})
         if limites["patrones_lleno"]:
             return jsonify({"ok": False, "error": "Este tema ya tiene muchos patrones."})
 
-        # Auto-detectar si existe
         conn = bd.conectar()
         existe = conn.execute("SELECT id FROM intenciones WHERE tag=?", (tag,)).fetchone()
         conn.close()
@@ -426,6 +478,7 @@ def ensenar_ruta():
             if respuesta:
                 auto.absorber_respuesta(tag, respuesta)
 
+        invalidar_cache(tag)
         solicitar_reentrenamiento()
         return jsonify({"ok": True})
 
@@ -435,33 +488,55 @@ def ensenar_ruta():
 
 
 # ============================================================
-#  API: STATS Y CEREBRO (con cache)
+#  API: STATS (con ETag)
 # ============================================================
 
 @app.route("/stats")
 def stats():
     try:
         ahora = time.time()
-        if _stats_cache["data"] and (ahora - _stats_cache["ts"]) < STATS_TTL:
+        ttl = _stats_ttl()
+        if _stats_cache["data"] and (ahora - _stats_cache["ts"]) < ttl:
             datos = _stats_cache["data"].copy()
         else:
             datos = bd.obtener_estadisticas()
             datos["vocabulario"] = len(_vocabulario)
+            etag = _generar_etag(datos)
             _stats_cache["data"] = datos
             _stats_cache["ts"] = ahora
+            _stats_cache["etag"] = etag
+
         datos["entrenando"] = os.path.exists(SIGNAL_RETRAIN)
-        return jsonify(datos)
+
+        # ETag check
+        if_none = request.headers.get("If-None-Match")
+        if if_none and if_none == _stats_cache["etag"]:
+            return Response(status=304)
+
+        resp = jsonify(datos)
+        resp.headers["ETag"] = _stats_cache["etag"]
+        return resp
     except Exception as e:
         logger.error(f"Error /stats: {e}")
         return jsonify({"error": "Error"}), 500
 
 
+# ============================================================
+#  API: CEREBRO (con ETag)
+# ============================================================
+
 @app.route("/api/cerebro")
 def api_cerebro():
     try:
         ahora = time.time()
-        if _cerebro_cache["data"] and (ahora - _cerebro_cache["ts"]) < CEREBRO_TTL:
-            return jsonify(_cerebro_cache["data"])
+        ttl = _cerebro_ttl()
+        if _cerebro_cache["data"] and (ahora - _cerebro_cache["ts"]) < ttl:
+            if_none = request.headers.get("If-None-Match")
+            if if_none and if_none == _cerebro_cache["etag"]:
+                return Response(status=304)
+            resp = jsonify(_cerebro_cache["data"])
+            resp.headers["ETag"] = _cerebro_cache["etag"]
+            return resp
 
         temas = bd.obtener_temas_detallados()
         estadisticas = bd.obtener_estadisticas()
@@ -476,11 +551,33 @@ def api_cerebro():
                     conexiones.append({"from": tags_list[i], "to": tags_list[j], "peso": len(shared)})
 
         resultado = {"temas": temas, "estadisticas": estadisticas, "conexiones": conexiones}
+        etag = _generar_etag(resultado)
         _cerebro_cache["data"] = resultado
         _cerebro_cache["ts"] = ahora
-        return jsonify(resultado)
+        _cerebro_cache["etag"] = etag
+
+        resp = jsonify(resultado)
+        resp.headers["ETag"] = etag
+        return resp
     except Exception as e:
         logger.error(f"Error /api/cerebro: {e}")
+        return jsonify({"error": "Error interno"}), 500
+
+
+# ============================================================
+#  API: CAMBIOS DESDE TIMESTAMP (para bienvenida)
+# ============================================================
+
+@app.route("/api/cambios")
+def api_cambios():
+    try:
+        desde = request.args.get("desde", "")
+        if not desde:
+            return jsonify({"error": "Parametro 'desde' requerido"}), 400
+        resultado = bd.obtener_cambios_desde(desde)
+        return jsonify(resultado)
+    except Exception as e:
+        logger.error(f"Error /api/cambios: {e}")
         return jsonify({"error": "Error interno"}), 500
 
 
@@ -490,12 +587,12 @@ def api_cerebro():
 
 @app.route("/stream/stats")
 def stream_stats():
-    """Server-Sent Events para stats en tiempo real."""
     def generar():
         while True:
             try:
                 ahora = time.time()
-                if _stats_cache["data"] and (ahora - _stats_cache["ts"]) < STATS_TTL:
+                ttl = _stats_ttl()
+                if _stats_cache["data"] and (ahora - _stats_cache["ts"]) < ttl:
                     datos = _stats_cache["data"]
                 else:
                     datos = bd.obtener_estadisticas()
