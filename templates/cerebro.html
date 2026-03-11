@@ -124,7 +124,25 @@ const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
 renderer.setSize(innerWidth,innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio,2));
 renderer.toneMapping=THREE.ACESFilmicToneMapping;
-renderer.setClearColor(0x06060c);
+renderer.setClearColor(0x06060c,1);
+
+// Shared circular point texture for all PointsMaterial
+const _circTex=(function(){
+    const cv=document.createElement('canvas');cv.width=64;cv.height=64;
+    const ctx=cv.getContext('2d');
+    ctx.clearRect(0,0,64,64);
+    const g=ctx.createRadialGradient(32,32,0,32,32,32);
+    g.addColorStop(0,'rgba(255,255,255,1)');
+    g.addColorStop(0.4,'rgba(255,255,255,0.6)');
+    g.addColorStop(0.7,'rgba(255,255,255,0.1)');
+    g.addColorStop(1,'rgba(255,255,255,0)');
+    ctx.fillStyle=g;ctx.fillRect(0,0,64,64);
+    const t=new THREE.CanvasTexture(cv);
+    t.premultiplyAlpha=false;
+    t.generateMipmaps=false;
+    t.minFilter=THREE.LinearFilter;
+    return t;
+})();
 document.body.insertBefore(renderer.domElement,document.body.firstChild);
 
 window.addEventListener('resize',()=>{
@@ -304,7 +322,7 @@ for(let i=0;i<brainPoints.length;i++){
     brainPos[i*3+2]=brainPoints[i].z;
 }
 brainGeo.setAttribute('position',new THREE.BufferAttribute(brainPos,3));
-const brainMat=new THREE.PointsMaterial({color:0x334455,size:0.8,transparent:true,opacity:0.04,sizeAttenuation:true});
+const brainMat=new THREE.PointsMaterial({map:_circTex,color:0x334455,size:2.5,transparent:true,opacity:0.06,sizeAttenuation:true,blending:THREE.AdditiveBlending,depthTest:false,depthWrite:false,toneMapped:false,alphaTest:0.001});
 const brainMesh=new THREE.Points(brainGeo,brainMat);
 scene.add(brainMesh);
 
@@ -340,7 +358,7 @@ for(let i=0;i<starCount;i++){
 starGeo.setAttribute('position',new THREE.BufferAttribute(starPos,3));
 starGeo.setAttribute('color',new THREE.BufferAttribute(starColors,3));
 starGeo.setAttribute('size',new THREE.BufferAttribute(starSizes,1));
-const starMat=new THREE.PointsMaterial({size:1.2,transparent:true,opacity:0.6,vertexColors:true,sizeAttenuation:true});
+const starMat=new THREE.PointsMaterial({map:_circTex,size:2,transparent:true,opacity:0.6,vertexColors:true,sizeAttenuation:true,blending:THREE.AdditiveBlending,depthTest:false,depthWrite:false,toneMapped:false,alphaTest:0.001});
 scene.add(new THREE.Points(starGeo,starMat));
 
 // ============================================================
@@ -355,15 +373,20 @@ function createNebulaTexture(c){
     g.addColorStop(0,'rgba('+c[0]+','+c[1]+','+c[2]+',0.12)');
     g.addColorStop(0.4,'rgba('+c[0]+','+c[1]+','+c[2]+',0.04)');
     g.addColorStop(1,'rgba('+c[0]+','+c[1]+','+c[2]+',0)');
+    ctx.clearRect(0,0,256,256);
     ctx.fillStyle=g;ctx.fillRect(0,0,256,256);
-    return new THREE.CanvasTexture(cv);
+    const tex=new THREE.CanvasTexture(cv);
+    tex.premultiplyAlpha=false;
+    tex.generateMipmaps=false;
+    tex.minFilter=THREE.LinearFilter;
+    return tex;
 }
 
 const nebColors=[[0,235,176],[155,109,255],[68,136,255],[255,100,140]];
 const nebulae=[];
 for(let i=0;i<4;i++){
     const tex=createNebulaTexture(nebColors[i]);
-    const mat=new THREE.SpriteMaterial({map:tex,transparent:true,opacity:0.4,depthWrite:false});
+    const mat=new THREE.SpriteMaterial({map:tex,transparent:true,opacity:0.4,depthWrite:false,depthTest:false,blending:THREE.AdditiveBlending,toneMapped:false,alphaTest:0.001});
     const sprite=new THREE.Sprite(mat);
     sprite.scale.set(400+Math.random()*150,400+Math.random()*150,1);
     sprite.position.set((Math.random()-0.5)*200,(Math.random()-0.5)*200,-300-Math.random()*200);
@@ -386,7 +409,7 @@ for(let i=0;i<dustCount;i++){
     dustVel.push({x:(Math.random()-0.5)*0.05,y:(Math.random()-0.5)*0.05,z:(Math.random()-0.5)*0.05});
 }
 dustGeo.setAttribute('position',new THREE.BufferAttribute(dustPos,3));
-const dustMat=new THREE.PointsMaterial({color:0xffffff,size:0.6,transparent:true,opacity:0.2,sizeAttenuation:true});
+const dustMat=new THREE.PointsMaterial({map:_circTex,color:0xffffff,size:1.5,transparent:true,opacity:0.2,sizeAttenuation:true,blending:THREE.AdditiveBlending,depthTest:false,depthWrite:false,toneMapped:false,alphaTest:0.001});
 const dustMesh=new THREE.Points(dustGeo,dustMat);
 scene.add(dustMesh);
 
@@ -398,7 +421,8 @@ function createNodeTexture(r,g,b){
     const cv=document.createElement('canvas');
     cv.width=128;cv.height=128;
     const ctx=cv.getContext('2d');
-    // Outer halo
+    ctx.clearRect(0,0,128,128);
+    // Outer halo - use circular clip so corners stay transparent
     const g2=ctx.createRadialGradient(64,64,0,64,64,64);
     g2.addColorStop(0,'rgba('+r+','+g+','+b+',0.3)');
     g2.addColorStop(0.3,'rgba('+r+','+g+','+b+',0.1)');
@@ -410,9 +434,32 @@ function createNodeTexture(r,g,b){
     g3.addColorStop(0,'rgba(255,255,255,0.9)');
     g3.addColorStop(0.5,'rgba('+r+','+g+','+b+',0.5)');
     g3.addColorStop(1,'rgba('+r+','+g+','+b+',0)');
-    ctx.fillStyle=g3;ctx.beginPath();ctx.arc(64,64,12,0,Math.PI*2);ctx.fill();
-    return new THREE.CanvasTexture(cv);
+    ctx.fillStyle=g3;ctx.fillRect(0,0,128,128);
+    const tex=new THREE.CanvasTexture(cv);
+    tex.premultiplyAlpha=false;
+    tex.generateMipmaps=false;
+    tex.minFilter=THREE.LinearFilter;
+    return tex;
 }
+
+// Pulse texture (shared)
+const _pulseTexCache=(function(){
+    const cv=document.createElement('canvas');
+    cv.width=64;cv.height=64;
+    const ctx=cv.getContext('2d');
+    ctx.clearRect(0,0,64,64);
+    const g=ctx.createRadialGradient(32,32,0,32,32,32);
+    g.addColorStop(0,'rgba(255,255,255,0.9)');
+    g.addColorStop(0.3,'rgba(255,255,255,0.4)');
+    g.addColorStop(0.7,'rgba(255,255,255,0.05)');
+    g.addColorStop(1,'rgba(255,255,255,0)');
+    ctx.fillStyle=g;ctx.fillRect(0,0,64,64);
+    const t=new THREE.CanvasTexture(cv);
+    t.premultiplyAlpha=false;
+    t.generateMipmaps=false;
+    t.minFilter=THREE.LinearFilter;
+    return t;
+})();
 
 // Color cache
 const texCache={};
@@ -496,7 +543,7 @@ async function loadData(){
 
             // Create sprite
             const tex=getNodeTexture(col.r,col.g,col.b);
-            const mat=new THREE.SpriteMaterial({map:tex,transparent:true,opacity:1,depthWrite:false});
+            const mat=new THREE.SpriteMaterial({map:tex,transparent:true,opacity:1,depthWrite:false,depthTest:false,blending:THREE.AdditiveBlending,toneMapped:false,alphaTest:0.001});
             const sprite=new THREE.Sprite(mat);
             sprite.position.copy(pos);
             sprite.scale.set(sc,sc,1);
@@ -542,13 +589,13 @@ async function loadData(){
                 const cr=Math.round((a.color.r+b.color.r)/2);
                 const cg=Math.round((a.color.g+b.color.g)/2);
                 const cb=Math.round((a.color.b+b.color.b)/2);
-                const lineMat=new THREE.LineBasicMaterial({color:new THREE.Color(cr/255,cg/255,cb/255),transparent:true,opacity:0.08+c.peso*0.02});
+                const lineMat=new THREE.LineBasicMaterial({color:new THREE.Color(cr/255,cg/255,cb/255),transparent:true,opacity:0.08+c.peso*0.02,blending:THREE.AdditiveBlending,depthTest:false,depthWrite:false,toneMapped:false});
                 const line=new THREE.Line(lineGeo,lineMat);
                 scene.add(line);
                 edgeLines.push(line);
 
                 // Pulse sprite
-                const pulseMat=new THREE.SpriteMaterial({color:0xffffff,transparent:true,opacity:0.4,depthWrite:false});
+                const pulseMat=new THREE.SpriteMaterial({map:_pulseTexCache,transparent:true,opacity:0.4,depthWrite:false,depthTest:false,blending:THREE.AdditiveBlending,toneMapped:false,alphaTest:0.001});
                 const pulse=new THREE.Sprite(pulseMat);
                 pulse.scale.set(3,3,1);
                 scene.add(pulse);
@@ -744,9 +791,9 @@ function birthEffect(tag){
     if(idx<0)return;
     const n=nodes[idx];
     for(let i=0;i<25;i++){
-        const geo=new THREE.SphereGeometry(0.5,4,4);
-        const mat=new THREE.MeshBasicMaterial({color:new THREE.Color(n.color.r/255,n.color.g/255,n.color.b/255),transparent:true,opacity:0.8});
-        const mesh=new THREE.Mesh(geo,mat);
+        const bMat=new THREE.SpriteMaterial({map:_pulseTexCache,color:new THREE.Color(n.color.r/255,n.color.g/255,n.color.b/255),transparent:true,opacity:0.8,depthWrite:false,depthTest:false,blending:THREE.AdditiveBlending,toneMapped:false,alphaTest:0.001});
+        const mesh=new THREE.Sprite(bMat);
+        mesh.scale.set(2,2,1);
         mesh.position.copy(n.position);
         scene.add(mesh);
         const dir=new THREE.Vector3(Math.random()-0.5,Math.random()-0.5,Math.random()-0.5).normalize();
@@ -847,7 +894,6 @@ function animate(){
         bp.mesh.material.opacity=bp.life*0.8;
         if(bp.life<=0){
             scene.remove(bp.mesh);
-            bp.mesh.geometry.dispose();
             bp.mesh.material.dispose();
             birthParticles.splice(i,1);
         }
